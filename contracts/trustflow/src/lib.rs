@@ -324,6 +324,31 @@ pub struct VoteRevealed {
     pub vote_for_depositor: bool,
 }
 
+/// Emitted when an escrow is completed and all funds have been distributed.
+/// This event is emitted when the escrow status changes to `Settled`, either
+/// through milestone releases or dispute resolution.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct EscrowCompleted {
+    pub escrow_id: u64,
+    pub depositor: Address,
+    pub beneficiary: Address,
+    pub total_amount: i128,
+    pub completion_reason: CompletionReason,
+}
+
+/// Indicates how an escrow was completed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompletionReason {
+    /// All milestones were successfully released
+    MilestonesReleased,
+    /// Dispute was resolved with ruling for depositor
+    DisputeResolvedForDepositor,
+    /// Dispute was resolved with ruling for beneficiary
+    DisputeResolvedForBeneficiary,
+}
+
 // ---------------------------------------------------------------------------
 // Storage types
 // ---------------------------------------------------------------------------
@@ -961,6 +986,21 @@ impl TrustFlow {
         escrow.milestones.set(milestone_index, milestone);
         if escrow_released_after == escrow.amount {
             escrow.status = EscrowStatus::Settled;
+            // Emit EscrowCompleted event when all funds are distributed
+            env.events().publish(
+                (
+                    symbol_short!("escrow"),
+                    symbol_short!("completed"),
+                    escrow_id,
+                ),
+                EscrowCompleted {
+                    escrow_id,
+                    depositor: escrow.depositor.clone(),
+                    beneficiary: escrow.beneficiary.clone(),
+                    total_amount: escrow.amount,
+                    completion_reason: CompletionReason::MilestonesReleased,
+                },
+            );
         }
         env.storage().persistent().set(&escrow_key, &escrow);
         extend_persistent_ttl(&env, &escrow_key);
@@ -1353,6 +1393,26 @@ impl TrustFlow {
         }
 
         escrow.status = EscrowStatus::Settled;
+        // Emit EscrowCompleted event when dispute is resolved
+        let completion_reason = if ruling {
+            CompletionReason::DisputeResolvedForDepositor
+        } else {
+            CompletionReason::DisputeResolvedForBeneficiary
+        };
+        env.events().publish(
+            (
+                symbol_short!("escrow"),
+                symbol_short!("completed"),
+                escrow_id,
+            ),
+            EscrowCompleted {
+                escrow_id,
+                depositor: escrow.depositor.clone(),
+                beneficiary: escrow.beneficiary.clone(),
+                total_amount: escrow.amount,
+                completion_reason,
+            },
+        );
         env.storage().persistent().set(&escrow_key, &escrow);
         extend_persistent_ttl(&env, &escrow_key);
 
@@ -2693,11 +2753,13 @@ mod tests {
                     label: String::from_slice(&env, "M1"),
                     amount: 400,
                     approved: false,
+                    release_time: 0,
                 },
                 Milestone {
                     label: String::from_slice(&env, "M2"),
                     amount: 600,
                     approved: false,
+                    release_time: 0,
                 },
             ],
         );
@@ -2714,6 +2776,150 @@ mod tests {
         assert_eq!(escrow.status, EscrowStatus::Settled);
         assert!(escrow.milestones.get(0).unwrap().approved);
         assert!(escrow.milestones.get(1).unwrap().approved);
+
+        // Verify EscrowCompleted event was emitted
+        let (event_contract, event_topics, event_data) = env.events().all().last().unwrap();
+        assert_eq!(event_contract, client.address);
+        assert_eq!(event_topics[0], soroban_sdk::symbol_short!("escrow"));
+        assert_eq!(event_topics[1], soroban_sdk::symbol_short!("completed"));
+        assert_eq!(event_topics[2], escrow_id.into_val(&env));
+
+        let completed: EscrowCompleted = event_data.into_val(&env);
+        assert_eq!(completed.escrow_id, escrow_id);
+        assert_eq!(completed.total_amount, 1_000);
+        assert_eq!(
+            completed.completion_reason,
+            CompletionReason::MilestonesReleased
+        );
+    }
+
+    #[test]
+    fn test_escrow_completed_emitted_on_dispute_resolution_for_depositor() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _token_addr, sac) = setup(&env, DEFAULT_SLASH_BPS);
+        let (depositor, beneficiary, escrow_id) =
+            setup_milestone_escrow(&env, &client, &sac, 1_000);
+
+        client.raise_dispute(&escrow_id, &depositor, &String::from_slice(&env, "test"));
+
+        // Setup jurors and votes favoring depositor
+        let juror1 = Address::random(&env);
+        let juror2 = Address::random(&env);
+        let juror3 = Address::random(&env);
+        client.stake(&juror1, &10_000);
+        client.stake(&juror2, &10_000);
+        client.stake(&juror3, &10_000);
+
+        let salt = test_salt(&env);
+        let commit1 = hash_vote(&env, true, &salt);
+        let commit2 = hash_vote(&env, true, &salt);
+        let commit3 = hash_vote(&env, true, &salt);
+
+        client.commit_vote(&escrow_id, &juror1, &commit1);
+        client.commit_vote(&escrow_id, &juror2, &commit2);
+        client.commit_vote(&escrow_id, &juror3, &commit3);
+
+        advance_ledger(&env, LEDGERS_PER_DAY + 1);
+
+        client.reveal_vote(&escrow_id, &juror1, &true, &salt);
+        client.reveal_vote(&escrow_id, &juror2, &true, &salt);
+        client.reveal_vote(&escrow_id, &juror3, &true, &salt);
+
+        advance_ledger(&env, LEDGERS_PER_DAY + 1);
+
+        let ruling = client.resolve_dispute(&escrow_id);
+        assert!(ruling);
+
+        // Verify EscrowCompleted event was emitted with correct reason
+        let (event_contract, event_topics, event_data) = env.events().all().last().unwrap();
+        assert_eq!(event_contract, client.address);
+        assert_eq!(event_topics[0], soroban_sdk::symbol_short!("escrow"));
+        assert_eq!(event_topics[1], soroban_sdk::symbol_short!("completed"));
+        assert_eq!(event_topics[2], escrow_id.into_val(&env));
+
+        let completed: EscrowCompleted = event_data.into_val(&env);
+        assert_eq!(completed.escrow_id, escrow_id);
+        assert_eq!(completed.total_amount, 1_000);
+        assert_eq!(
+            completed.completion_reason,
+            CompletionReason::DisputeResolvedForDepositor
+        );
+    }
+
+    #[test]
+    fn test_escrow_completed_emitted_on_dispute_resolution_for_beneficiary() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _token_addr, sac) = setup(&env, DEFAULT_SLASH_BPS);
+        let (depositor, beneficiary, escrow_id) =
+            setup_milestone_escrow(&env, &client, &sac, 1_000);
+
+        client.raise_dispute(&escrow_id, &depositor, &String::from_slice(&env, "test"));
+
+        // Setup jurors and votes favoring beneficiary
+        let juror1 = Address::random(&env);
+        let juror2 = Address::random(&env);
+        let juror3 = Address::random(&env);
+        client.stake(&juror1, &10_000);
+        client.stake(&juror2, &10_000);
+        client.stake(&juror3, &10_000);
+
+        let salt = test_salt(&env);
+        let commit1 = hash_vote(&env, false, &salt);
+        let commit2 = hash_vote(&env, false, &salt);
+        let commit3 = hash_vote(&env, false, &salt);
+
+        client.commit_vote(&escrow_id, &juror1, &commit1);
+        client.commit_vote(&escrow_id, &juror2, &commit2);
+        client.commit_vote(&escrow_id, &juror3, &commit3);
+
+        advance_ledger(&env, LEDGERS_PER_DAY + 1);
+
+        client.reveal_vote(&escrow_id, &juror1, &false, &salt);
+        client.reveal_vote(&escrow_id, &juror2, &false, &salt);
+        client.reveal_vote(&escrow_id, &juror3, &false, &salt);
+
+        advance_ledger(&env, LEDGERS_PER_DAY + 1);
+
+        let ruling = client.resolve_dispute(&escrow_id);
+        assert!(!ruling);
+
+        // Verify EscrowCompleted event was emitted with correct reason
+        let (event_contract, event_topics, event_data) = env.events().all().last().unwrap();
+        assert_eq!(event_contract, client.address);
+        assert_eq!(event_topics[0], soroban_sdk::symbol_short!("escrow"));
+        assert_eq!(event_topics[1], soroban_sdk::symbol_short!("completed"));
+        assert_eq!(event_topics[2], escrow_id.into_val(&env));
+
+        let completed: EscrowCompleted = event_data.into_val(&env);
+        assert_eq!(completed.escrow_id, escrow_id);
+        assert_eq!(completed.total_amount, 1_000);
+        assert_eq!(
+            completed.completion_reason,
+            CompletionReason::DisputeResolvedForBeneficiary
+        );
+    }
+
+    #[test]
+    fn test_escrow_completed_not_emitted_on_partial_release() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _token_addr, sac) = setup(&env, DEFAULT_SLASH_BPS);
+        let (depositor, _beneficiary, escrow_id) =
+            setup_milestone_escrow(&env, &client, &sac, 1_000);
+
+        // Partial release should not emit EscrowCompleted
+        client.release_milestone_tranche(&escrow_id, &0u32, &400, &depositor);
+
+        // Check that the last event is MilestoneTrancheReleased, not EscrowCompleted
+        let (event_contract, event_topics, _event_data) = env.events().all().last().unwrap();
+        assert_eq!(event_contract, client.address);
+        assert_eq!(event_topics[0], soroban_sdk::symbol_short!("mstone"));
+        assert_eq!(event_topics[1], soroban_sdk::symbol_short!("release"));
     }
 
     #[test]
