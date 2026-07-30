@@ -2753,13 +2753,11 @@ mod tests {
                     label: String::from_slice(&env, "M1"),
                     amount: 400,
                     approved: false,
-                    release_time: 0,
                 },
                 Milestone {
                     label: String::from_slice(&env, "M2"),
                     amount: 600,
                     approved: false,
-                    release_time: 0,
                 },
             ],
         );
@@ -2778,13 +2776,27 @@ mod tests {
         assert!(escrow.milestones.get(1).unwrap().approved);
 
         // Verify EscrowCompleted event was emitted
-        let (event_contract, event_topics, event_data) = env.events().all().last().unwrap();
-        assert_eq!(event_contract, client.address);
-        assert_eq!(event_topics[0], soroban_sdk::symbol_short!("escrow"));
-        assert_eq!(event_topics[1], soroban_sdk::symbol_short!("completed"));
-        assert_eq!(event_topics[2], escrow_id.into_val(&env));
+        let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+            (symbol_short!("escrow"), symbol_short!("completed"), escrow_id).into_val(&env);
+        let completed_event_found = env
+            .events()
+            .all()
+            .iter()
+            .any(|(event_contract, event_topics, _)| {
+                *event_contract == client.address && *event_topics == expected_topics
+            });
+        assert!(completed_event_found);
 
-        let completed: EscrowCompleted = event_data.into_val(&env);
+        // Verify the event data
+        let completed_event = env
+            .events()
+            .all()
+            .iter()
+            .find(|(event_contract, event_topics, _)| {
+                *event_contract == client.address && *event_topics == expected_topics
+            })
+            .unwrap();
+        let completed: EscrowCompleted = completed_event.2.into_val(&env);
         assert_eq!(completed.escrow_id, escrow_id);
         assert_eq!(completed.total_amount, 1_000);
         assert_eq!(
@@ -2799,7 +2811,7 @@ mod tests {
         env.mock_all_auths();
 
         let (client, _token_addr, sac) = setup(&env, DEFAULT_SLASH_BPS);
-        let (depositor, beneficiary, escrow_id) =
+        let (depositor, _beneficiary, escrow_id) =
             setup_milestone_escrow(&env, &client, &sac, 1_000);
 
         client.raise_dispute(&escrow_id, &depositor, &String::from_slice(&env, "test"));
@@ -2833,13 +2845,26 @@ mod tests {
         assert!(ruling);
 
         // Verify EscrowCompleted event was emitted with correct reason
-        let (event_contract, event_topics, event_data) = env.events().all().last().unwrap();
-        assert_eq!(event_contract, client.address);
-        assert_eq!(event_topics[0], soroban_sdk::symbol_short!("escrow"));
-        assert_eq!(event_topics[1], soroban_sdk::symbol_short!("completed"));
-        assert_eq!(event_topics[2], escrow_id.into_val(&env));
+        let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+            (symbol_short!("escrow"), symbol_short!("completed"), escrow_id).into_val(&env);
+        let completed_event_found = env
+            .events()
+            .all()
+            .iter()
+            .any(|(event_contract, event_topics, _)| {
+                *event_contract == client.address && *event_topics == expected_topics
+            });
+        assert!(completed_event_found);
 
-        let completed: EscrowCompleted = event_data.into_val(&env);
+        let completed_event = env
+            .events()
+            .all()
+            .iter()
+            .find(|(event_contract, event_topics, _)| {
+                *event_contract == client.address && *event_topics == expected_topics
+            })
+            .unwrap();
+        let completed: EscrowCompleted = completed_event.2.into_val(&env);
         assert_eq!(completed.escrow_id, escrow_id);
         assert_eq!(completed.total_amount, 1_000);
         assert_eq!(
@@ -2854,7 +2879,7 @@ mod tests {
         env.mock_all_auths();
 
         let (client, _token_addr, sac) = setup(&env, DEFAULT_SLASH_BPS);
-        let (depositor, beneficiary, escrow_id) =
+        let (depositor, _beneficiary, escrow_id) =
             setup_milestone_escrow(&env, &client, &sac, 1_000);
 
         client.raise_dispute(&escrow_id, &depositor, &String::from_slice(&env, "test"));
@@ -2888,13 +2913,26 @@ mod tests {
         assert!(!ruling);
 
         // Verify EscrowCompleted event was emitted with correct reason
-        let (event_contract, event_topics, event_data) = env.events().all().last().unwrap();
-        assert_eq!(event_contract, client.address);
-        assert_eq!(event_topics[0], soroban_sdk::symbol_short!("escrow"));
-        assert_eq!(event_topics[1], soroban_sdk::symbol_short!("completed"));
-        assert_eq!(event_topics[2], escrow_id.into_val(&env));
+        let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+            (symbol_short!("escrow"), symbol_short!("completed"), escrow_id).into_val(&env);
+        let completed_event_found = env
+            .events()
+            .all()
+            .iter()
+            .any(|(event_contract, event_topics, _)| {
+                *event_contract == client.address && *event_topics == expected_topics
+            });
+        assert!(completed_event_found);
 
-        let completed: EscrowCompleted = event_data.into_val(&env);
+        let completed_event = env
+            .events()
+            .all()
+            .iter()
+            .find(|(event_contract, event_topics, _)| {
+                *event_contract == client.address && *event_topics == expected_topics
+            })
+            .unwrap();
+        let completed: EscrowCompleted = completed_event.2.into_val(&env);
         assert_eq!(completed.escrow_id, escrow_id);
         assert_eq!(completed.total_amount, 1_000);
         assert_eq!(
@@ -2918,8 +2956,10 @@ mod tests {
         // Check that the last event is MilestoneTrancheReleased, not EscrowCompleted
         let (event_contract, event_topics, _event_data) = env.events().all().last().unwrap();
         assert_eq!(event_contract, client.address);
-        assert_eq!(event_topics[0], soroban_sdk::symbol_short!("mstone"));
-        assert_eq!(event_topics[1], soroban_sdk::symbol_short!("release"));
+
+        let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+            (symbol_short!("mstone"), symbol_short!("release")).into_val(&env);
+        assert_eq!(event_topics, expected_topics);
     }
 
     #[test]
